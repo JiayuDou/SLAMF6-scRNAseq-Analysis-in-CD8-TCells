@@ -1,0 +1,88 @@
+---
+title: "SLAMF6 Basic Analysis"
+---
+
+```{r library}
+ library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(RColorBrewer)
+library(viridis)
+
+seurat_obj <- readRDS("./CD8.rds")
+```
+
+```{r Panel A-C}
+# Subset to include only tumor tissues
+tumor_tissues <- c("Primary tumor tissue", "Metastatic tumor tissue")
+seurat_tumor <- subset(seurat_obj, subset = TissueType %in% tumor_tissues)
+
+# Store original annotations
+seurat_tumor$original_cell_type <- seurat_tumor$cell.type
+
+p1<-DimPlot(seurat_tumor, 
+                        reduction = "umap", 
+                        group.by = "cell.type",
+                        label = TRUE, 
+                        pt.size = 0.05,  # Smaller dots
+                        label.size = 3,
+                        repel = TRUE) +
+  ggtitle("UMAP - Original Cell Types") +
+  theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+
+# Save the DimPlot as a PDF
+ggsave("Original_Cell_Types_Tumor_UMAP-A.pdf", plot = p1, width = 11, height = 6)
+
+print(p1)
+
+# Randomly sample cells for cleaner visualization
+# Calculate 1/10 of total cells
+n_cells_to_plot <- round(ncol(seurat_tumor) / 2)
+set.seed(123)
+cells_to_plot <- sample(colnames(seurat_tumor), n_cells_to_plot)
+
+p2 <- FeaturePlot(seurat_tumor[, cells_to_plot], 
+                  features = "SLAMF6", 
+                  reduction = "umap",
+                  max.cutoff = "q98",
+                  pt.size = 0.05,
+                  order = FALSE,
+                  alpha = 0.8,
+                  cols = c("lightgrey", "blue")) &
+  theme(plot.title = element_text(size = 10))
+
+# Check how many cells plotting
+print(paste("Total cells:", ncol(seurat_tumor)))
+print(paste("Plotting cells:", length(cells_to_plot)))
+print(p2)
+ggsave("SLAMF6_FeaturePlot_Sampled-B.pdf", plot = p2, width = 9, height = 6)
+
+# Extract data
+plot_data <- FetchData(seurat_tumor, vars = c("SLAMF6", "cell.type"))
+
+# Calculate summary statistics
+summary_stats <- plot_data %>%
+  group_by(cell.type) %>%
+  summarise(
+    mean_expr = mean(SLAMF6),
+    pct_expressed = sum(SLAMF6 > 0) / n() * 100,
+    .groups = 'drop'
+  )
+
+# Create dot plot
+p_3 <- ggplot(summary_stats, aes(x = reorder(cell.type, mean_expr), y = mean_expr)) +
+  geom_point(aes(size = pct_expressed, color = mean_expr), alpha = 0.8) +
+  scale_color_viridis_c(name = "Mean\nExpression") +
+  scale_size_continuous(name = "% Expressed", range = c(2, 10)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        plot.title = element_text(size = 12, face = "bold")) +
+  labs(title = "SLAMF6 Expression Summary by Cell Type",
+       x = "Cell Type",
+       y = "Mean Expression")
+
+print(p_3)
+ggsave("SLAMF6_Expression_Summary_DotPlot-C.pdf", plot = p_3, width = 7, height = 5)
+
+```
