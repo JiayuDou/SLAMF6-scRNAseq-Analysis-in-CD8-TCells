@@ -1,0 +1,237 @@
+---
+title: "Exhaustion Analysis"
+---
+
+```{r setup}
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(RColorBrewer)
+library(gridExtra)
+library(reshape2)
+library(viridis)
+library(cowplot)
+library(cluster)
+
+seurat_obj <- readRDS("./CD8.rds")
+
+# Define genes of interest
+gene_list <- c(
+  "SLAMF6", # Same
+  "TCF7", # TCF1
+  "IL7R", # CD127
+  "PDCD1", # PD1
+  "HAVCR2", # TIM3
+  "ENTPD1", # CD39
+  "GZMB", # Same
+  "GNLY", # Same
+  "LAG3"
+  )
+```
+
+```{r subsetting}
+# Subset to include only tumor tissues
+tumor_tissues <- c("Primary tumor tissue", "Metastatic tumor tissue")
+seurat_tumor <- subset(seurat_obj, subset = TissueType %in% tumor_tissues)
+
+# Store original annotations
+seurat_tumor$original_cell_type <- seurat_tumor$cell.type
+
+# Subset for exhaustion-related T cells
+# Based on your cell types, exhaustion cells are CD8_c1_Tex and CD8_c7_p-Tex
+exhaustion_cells <- c("CD8_c1_Tex", "CD8_c7_p-Tex")
+
+# Subset the Seurat object
+seurat_exhaustion <- subset(seurat_tumor, subset = cell.type %in% exhaustion_cells)
+```
+
+```{r batch_analysis}
+# DATA INTEGRATION FOLLOWING CHU ET AL. METHODOLOGY
+
+# Split object by batch for integration 
+cd8_list <- SplitObject(seurat_exhaustion, split.by = "batch")
+
+# Remove batches with too few cells
+min_cells <- 200
+cd8_list <- cd8_list[sapply(cd8_list, ncol) >= min_cells]
+
+# Normalize each batch separately
+cd8_list <- lapply(cd8_list, function(x) {
+  x <- NormalizeData(x, normalization.method = "LogNormalize", scale.factor = 10000)
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+})
+
+# Select integration features 
+integration_features <- SelectIntegrationFeatures(object.list = cd8_list, nfeatures = 1000)
+
+# Remove noise genes using TCellMap GitHub approach
+gene.pattern <- c("MALAT1", "^HSPA", "^MT-", "^MT\\.", "^RPL", "^RPS", "^LOC[0-9]", "^TR(A|B|G|D)V", "^MTRNR")
+
+# Find genes matching noise patterns
+noiseGenesByPattern <- grep(paste0(gene.pattern, collapse = "|"), integration_features, value = TRUE)
+
+# Additional specific noise genes identified by TCellMap
+specificNoiseGenes <- c("ZNF14", "VIPAS39", "ZNF408", "TADA1", "ARMCX5", "DCUN1D4", "ATG4C", 
+                       "ZNF559", "TRIB3", "ZNF337", "IFIT5", "C1orf216", "DHX58", "S100B", 
+                       "EGR2", "ZKSCAN8", "PDIK1L", "ZBTB6", "SLC40A1", "KBTBD7")
+
+# Combine all noise genes
+noiseGenes <- union(specificNoiseGenes, noiseGenesByPattern)
+
+# Remove noise genes from integration features
+integration_features_clean <- setdiff(integration_features, noiseGenes)
+
+# Use the cleaned feature list
+integration_features <- integration_features_clean
+
+cat("Integration features after filtering:", length(integration_features), "\n")
+
+# Scale data and run PCA with dynamic PC selection
+cd8_list <- lapply(cd8_list, function(x) {
+  # Scale data
+  x <- ScaleData(x, features = integration_features, verbose = FALSE)
+  
+  # Determine maximum PCs based on data dimensions
+  max_pcs <- min(50, ncol(x) - 1, length(integration_features) - 1)
+  
+  # Run PCA with appropriate number of PCs
+  if (max_pcs >= 10) {  # Minimum 10 PCs for meaningful analysis
+    x <- RunPCA(x, features = integration_features, npcs = max_pcs, verbose = FALSE)
+  } else {
+    warning(paste("Batch", unique(x$batch), "has too few dimensions for PCA"))
+    return(NULL)
+  }
+  return(x)
+})
+
+# Remove NULL objects (batches that couldn't be processed)
+cd8_list <- cd8_list[!sapply(cd8_list, is.null)]
+```
+
+```{r integration}
+# Find integration anchors with rPCA
+cd8_anchors <- FindIntegrationAnchors(
+  object.list = cd8_list, 
+  anchor.features = integration_features,
+  reduction = "rpca",  # Chu et al. validated approach
+  dims = 1:30,
+  k.anchor = min(20, min(sapply(cd8_list, ncol)) - 1)  
+)
+
+# Integrate the data
+print("=== Integrating data ===")
+cd8_integrated <- IntegrateData(
+  anchorset = cd8_anchors, 
+  dims = dims_to_use,
+  k.weight = min(50, min(sapply(cd8_list, ncol)) - 1)  
+)
+
+print(paste("Integration completed. Final object has", ncol(cd8_integrated), "cells"))
+```
+
+```{r integration_finalization}
+# Set default assay to integrated
+DefaultAssay(cd8_integrated) <- "integrated"
+
+# Set variable features and scale
+VariableFeatures(cd8_integrated) <- integration_features
+cd8_integrated <- ScaleData(cd8_integrated, features = integration_features, verbose = FALSE)
+
+# Run PCA with expanded features
+cd8_integrated <- RunPCA(cd8_integrated, features = integration_features, npcs = 50, verbose = FALSE)
+```
+
+```{r test}
+# Elbow plot to assess PC selection
+elbow_plot <- ElbowPlot(cd8_integrated, ndims = 50) + 
+  ggtitle("Elbow Plot - Integrated Data") +
+  geom_vline(xintercept = 16, linetype = "dashed", color = "red") +
+  annotate("text", x = 20, y = max(cd8_integrated[["pca"]]@stdev^2) * 0.8, 
+           label = "Chu et al.\nused 16 PCs", color = "red")
+
+print(elbow_plot)
+```
+
+```{r clustering_umap}
+DefaultAssay(cd8_integrated) <- "integrated"
+
+cd8_integrated <- RunUMAP(cd8_integrated, reduction = "pca", dims = 1:16,n.neighbors = 15, 
+                          min.dist = 0.1, 
+                          spread = 0.5, 
+                          metric = "correlation")
+cd8_integrated <- FindNeighbors(cd8_integrated, reduction = "pca", dims = 1:16,k.param = 20)
+cd8_integrated <- FindClusters(cd8_integrated, resolution = 0.5,algorithm = 1)  
+
+cat("Clustering completed with", length(unique(cd8_integrated$seurat_clusters)), "clusters\n")
+```
+
+```{r Panel D}
+# Create dot plot with genes as columns and cell types as rows
+dot_plot <- DotPlot(cd8_integrated, 
+                   features = gene_list,
+                   assay = "RNA",  # Specify RNA assay
+                   group.by = "cell.type",
+                   cols = c("lightgrey", "blue"),
+                   dot.scale = 10,
+                   scale = TRUE) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title = element_text(size = 14)) +
+  ggtitle("Gene Expression by Cell Type") +
+  theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"))
+
+print(dot_plot)
+
+# Save dot plot
+ggsave("./DotPlot_CellType-D.pdf", 
+       plot = dot_plot, width = 10, height = 6)
+```
+
+```{r comprehensive_visualizations-Panel E}
+# 1. UMAP plots showing different groupings
+p1 <- DimPlot(cd8_integrated, group.by = "cell.type", label = TRUE, repel = TRUE,pt.size = 0.2) + 
+  ggtitle("cell.type") +
+  theme(legend.position = "bottom", plot.title = element_text(hjust = 0.5))
+
+
+p2 <- DimPlot(cd8_integrated, group.by = "TissueType", cols = c("red", "blue")) + 
+  ggtitle("Tissue Types") +
+  theme(legend.position = "bottom", plot.title = element_text(hjust = 0.5))
+
+p3 <- DimPlot(cd8_integrated, group.by = "seurat_clusters", label = TRUE, repel = TRUE) + 
+  ggtitle("Clusters") +
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5))
+
+# Combine UMAP plots
+umap_combined <- plot_grid(p1, p2, p3, ncol = 3)
+print(umap_combined)
+
+# Save UMAP combined plot
+ggsave("./umap_overview_combined-E.pdf", 
+       umap_combined, width = 16, height = 6)
+```
+
+```{r feature_plots-Panel E}
+# Create feature plots for ALL available markers
+feature_plots_all <- FeaturePlot(cd8_integrated, 
+                                features = gene_list, 
+                                reduction = "umap",
+                                ncol = 3,
+                                alpha = 0.6,
+                                pt.size = 0.15,
+                                order = FALSE,  
+                                min.cutoff = "q5",  
+                                max.cutoff = "q98",  
+                                cols = c("lightgrey", "darkblue")) &
+  theme(plot.title = element_text(size = 10))&
+  xlab("UMAP1") &
+  ylab("UMAP2")
+
+print(feature_plots_all)
+ggsave("./FeaturePlots_All-F.pdf", 
+       plot = feature_plots_all, width = 20, height = 16)
+
+```
+
+
