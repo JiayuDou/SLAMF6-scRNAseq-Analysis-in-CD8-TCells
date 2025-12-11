@@ -15,6 +15,9 @@ Bin Li¹², Ming-Chao Zhong¹, Cristian Camilo Galindo¹³, Jiayu Dou¹³, Jin Q
 
 This repository contains all code used for the single-cell RNA sequencing analysis in the paper.
 
+Zenodo DOI
+DOI: 10.5281/zenodo.17902239
+
 ## Data availability
 The single-cell RNA-sequencing datasets analysed in this study are publicly available from the original publication:  
 Chu, Y. et al. Pan-cancer T cell atlas links a cellular stress response state to immunotherapy resistance. *Nat. Med.* **29**, 1550–1562 (2023). https://doi.org/10.1038/s41591-023-02371-y  
